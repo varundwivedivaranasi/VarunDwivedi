@@ -3,12 +3,21 @@ from pyspark.sql.functions import *
 from pyspark.sql.types import *
 from typing import List, Dict
 import json
+import os
 
 # COMMAND ----------
 
 input_path = "/Volumes/workspace/myschema/myvol/source/resturant_json_data.json"
 reject_path = "/Volumes/workspace/myschema/myvol/reject"
 rules_path = "/Volumes/workspace/myschema/myvol/validation_rules/quality_rules.json"
+
+# COMMAND ----------
+
+# check for file existence
+if not os.path.exists(rules_path):
+    raise FileNotFoundError(f"Validation rule file not found at: {rules_path}")
+else:
+    print("✅ Rule file found. Proceeding with validation...")
 
 # COMMAND ----------
 
@@ -54,47 +63,49 @@ class DataQualityValidator:
     def _generate_rule_id(self):
         return str(uuid.uuid4())
 
-    def check_not_null_or_blank(self, column_name: str, severity: str):
-        rule_id = self._generate_rule_id()
+    def check_not_null_or_blank(self, rule: Dict):
         failed_df = self.df.filter(
-            col(column_name).isNull() | (trim(col(column_name)) == "")
-        ).withColumn("error", lit(f"{column_name} is null or blank")) \
-         .withColumn("rule_id", lit(rule_id)) \
-         .withColumn("severity", lit(severity)) \
+            col(rule["column"]).isNull() | (trim(col(rule["column"])) == "")
+        ).withColumn("error", lit(rule["description"])) \
+         .withColumn("rule_id", lit(rule["id"])) \
+         .withColumn("category", lit(rule["category"])) \
+         .withColumn("severity", lit(rule["severity"])) \
          .withColumn("notebook_name", lit(self.notebook_name)) \
-         .withColumn("timestamp", lit(self.timestamp))
+         .withColumn("timestamp", lit(str(self.timestamp)))
 
         self.results.append({
-            "rule_id": rule_id,
-            "rule": f"{column_name} should not be null or blank",
-            "severity": severity,
+            "rule_id": rule["id"],
+            "rule": rule["description"],
+            "category": rule["category"],
+            "severity": rule["severity"],
             "failed_count": failed_df.count(),
             "failed_records": failed_df
         })
 
-    def check_pattern(self, column_name: str, pattern: str, severity: str):
-        rule_id = self._generate_rule_id()
-        failed_df = self.df.filter(~col(column_name).rlike(pattern)) \
-            .withColumn("error", lit(f"{column_name} does not match pattern '{pattern}'")) \
-            .withColumn("rule_id", lit(rule_id)) \
-            .withColumn("severity", lit(severity)) \
+    def check_pattern(self, rule: Dict):
+        failed_df = self.df.filter(~col(rule["column"]).rlike(rule["pattern"])) \
+            .withColumn("error", lit(rule["description"])) \
+            .withColumn("rule_id", lit(rule["id"])) \
+            .withColumn("category", lit(rule["category"])) \
+            .withColumn("severity", lit(rule["severity"])) \
             .withColumn("notebook_name", lit(self.notebook_name)) \
-            .withColumn("timestamp", lit(self.timestamp))
+            .withColumn("timestamp", lit(str(self.timestamp)))
 
         self.results.append({
-            "rule_id": rule_id,
-            "rule": f"{column_name} should match pattern '{pattern}'",
-            "severity": severity,
+            "rule_id": rule["id"],
+            "rule": rule["description"],
+            "category": rule["category"],
+            "severity": rule["severity"],
             "failed_count": failed_df.count(),
             "failed_records": failed_df
         })
 
-    def run_checks(self, rules: List[Dict[str, any]]):
+    def run_checks(self, rules: List[Dict]):
         for rule in rules:
             if rule["type"] == "not_null_or_blank":
-                self.check_not_null_or_blank(rule["column"], rule["severity"])
+                self.check_not_null_or_blank(rule)
             elif rule["type"] == "pattern":
-                self.check_pattern(rule["column"], rule["pattern"], rule["severity"])
+                self.check_pattern(rule)
 
     def show_results(self):
         for res in self.results:
@@ -102,14 +113,11 @@ class DataQualityValidator:
             res['failed_records'].show(truncate=False)
 
     def get_summary_df(self) -> DataFrame:
-        from pyspark.sql import SparkSession
-        spark = SparkSession.builder.getOrCreate()
-
-        summary_data = [(r["rule_id"], r["rule"], r["severity"], r["failed_count"],
-                         self.notebook_name, self.timestamp) for r in self.results]
+        summary_data = [(r["rule_id"], r["rule"], r["category"], r["severity"],
+                         r["failed_count"], self.notebook_name, str(self.timestamp)) for r in self.results]
 
         return spark.createDataFrame(summary_data, schema=[
-            "rule_id", "rule", "severity", "failed_count", "notebook_name", "timestamp"
+            "rule_id", "rule", "category", "severity", "failed_count", "notebook_name", "timestamp"
         ])
 
     def log_errors_to_blob(self, path: str):
