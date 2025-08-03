@@ -21,7 +21,8 @@ df = df_source.withColumn("restaurants",explode("restaurants"))\
                 .withColumn("ratings",col("restaurants.restaurant.user_rating.rating_text"))\
                     .withColumn("city",col("restaurants.restaurant.location.city"))\
                         .withColumn("establishment_types",explode_outer(col("restaurants.restaurant.establishment_types")))\
-                            .drop("code","message","results_found","results_shown","results_start","status","restaurants")
+                            .withColumn("deeplink",col("restaurants.restaurant.deeplink"))\
+                                .drop("code","message","results_found","results_shown","results_start","status","restaurants")
                                 
                                 
 
@@ -31,42 +32,77 @@ df.display()
 
 # COMMAND ----------
 
-def check_not_null(df, column_name: str) -> Dict[str, any]:
-    failed_df = df.filter(col(column_name).isNull())
+from pyspark.sql.functions import col, lit, trim
+from typing import List, Dict
+
+# Rule 1: Null or Blank Check
+def check_not_null_or_blank(df, column_name: str) -> Dict[str, any]:
+    failed_df = df.filter(
+        col(column_name).isNull() | (trim(col(column_name)) == "")
+    )
+    
     result = {
-        "rule": f"{column_name} should not be null",
+        "rule": f"{column_name} should not be null or blank",
         "failed_count": failed_df.count(),
-        "failed_records": failed_df.withColumn("error", lit(f"{column_name} is null"))
+        "failed_records": failed_df.withColumn(
+            "error", lit(f"{column_name} is null or blank")
+        )
     }
+    
+    return result
+
+# Rule 2: Pattern Match Check
+def check_pattern(df, column_name: str, pattern: str) -> Dict[str, any]:
+    failed_df = df.filter(~col(column_name).rlike(pattern))
+    
+    result = {
+        "rule": f"{column_name} should match pattern '{pattern}'",
+        "failed_count": failed_df.count(),
+        "failed_records": failed_df.withColumn(
+            "error", lit(f"{column_name} does not match expected pattern")
+        )
+    }
+    
     return result
 
 # COMMAND ----------
 
+# Unified Quality Check Runner
 def run_quality_checks(df, checks: List[Dict[str, any]]) -> List[Dict[str, any]]:
     results = []
     for check in checks:
-        if check["type"] == "not_null":
-            result = check_not_null(df, check["column"])
-            results.append(result)
+        column = check["column"]
+        if check["type"] == "not_null_or_blank":
+            result = check_not_null_or_blank(df, column)
+        elif check["type"] == "pattern":
+            result = check_pattern(df, column, check["pattern"])
+        else:
+            continue  # Unknown rule type
+        results.append(result)
     return results
 
 # COMMAND ----------
 
+# Sample Rules
 quality_rules = [
-    {"type": "not_null", "column": "cuisines"}
+    {"type": "not_null_or_blank", "column": "cuisines"},
+    {"type": "pattern", "column": "deeplink", "pattern": r"^zomato://restaurant/\d+$"}
 ]
 
+# Run Checks
 results = run_quality_checks(df, quality_rules)
 
-# Show failed records
+# Show Failed Records
 for res in results:
     print(f"Rule: {res['rule']}, Failed Count: {res['failed_count']}")
     res['failed_records'].show(truncate=False)
 
 # COMMAND ----------
 
+# Logging to Blob
 def log_errors_to_blob(failed_df, path: str):
     failed_df.write.mode("append").json(path)
 
 # Example
-log_errors_to_blob(results[0]["failed_records"], reject_path)
+if results:
+    log_errors_to_blob(results[0]["failed_records"], reject_path)
