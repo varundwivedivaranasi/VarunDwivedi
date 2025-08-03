@@ -5,6 +5,7 @@ from typing import List, Dict
 import json
 import os
 import datetime
+import uuid
 
 # COMMAND ----------
 
@@ -12,6 +13,7 @@ volume = "/Volumes/workspace/myschema/myvol"
 input_path = f"{volume}/source/resturant_json_data.json"
 reject_path = f"{volume}/reject"
 rules_path = f"{volume}/validation_rules/quality_rules.json"
+batch_id = str(uuid.uuid4())
 
 # COMMAND ----------
 
@@ -148,7 +150,10 @@ class DataQualityValidator:
         now = datetime.datetime.now()
         timestamp_str = now.strftime("%Y-%m-%dT%H-%M-%S")
         reject_path = f"{base_path}/rejects_{timestamp_str}"
-        
+
+        #write the summary into reject
+        summary_df = validator.get_summary_df()
+        summary_df.write.mode("overwrite").option("header", "true").csv(f"{reject_path}/summary")
         #write the data into reject
         for res in self.results:
             if res["failed_records"].count() > 0:
@@ -156,11 +161,21 @@ class DataQualityValidator:
 
 # COMMAND ----------
 
+
 validator = DataQualityValidator(df, notebook_name="Restaurant_Metadata_Validation")
+
 validator.run_checks(quality_rules)
-#validator.show_results()
 
 summary_df = validator.get_summary_df()
-summary_df.display()
 
 validator.log_errors_to_blob(reject_path)
+
+# COMMAND ----------
+
+summary_df = summary_df.withColumn("batch_id", lit(batch_id))
+summary_df.write.format("delta").mode("append").saveAsTable("workspace.myschema.validation_summary")
+
+# COMMAND ----------
+
+# MAGIC %sql
+# MAGIC select * from workspace.myschema.validation_summary;
