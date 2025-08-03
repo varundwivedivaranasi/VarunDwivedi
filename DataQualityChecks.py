@@ -4,12 +4,14 @@ from pyspark.sql.types import *
 from typing import List, Dict
 import json
 import os
+import datetime
 
 # COMMAND ----------
 
-input_path = "/Volumes/workspace/myschema/myvol/source/resturant_json_data.json"
-reject_path = "/Volumes/workspace/myschema/myvol/reject"
-rules_path = "/Volumes/workspace/myschema/myvol/validation_rules/quality_rules.json"
+volume = "/Volumes/workspace/myschema/myvol"
+input_path = f"{volume}/source/resturant_json_data.json"
+reject_path = f"{volume}/reject"
+rules_path = f"{volume}/validation_rules/quality_rules.json"
 
 # COMMAND ----------
 
@@ -38,7 +40,10 @@ df = df_source.withColumn("restaurants",explode("restaurants"))\
                     .withColumn("city",col("restaurants.restaurant.location.city"))\
                         .withColumn("establishment_types",explode_outer(col("restaurants.restaurant.establishment_types")))\
                             .withColumn("deeplink",col("restaurants.restaurant.deeplink"))\
-                                .drop("code","message","results_found","results_shown","results_start","status","restaurants")
+                                .withColumn("rating",when(col("ratings")=="Excellent",lit(4)).when(col("ratings")=="Very Good",lit(3))\
+                                    .when(col("ratings")=="Good",lit(2)).when(col("ratings")=="Average",lit(1)).otherwise(lit(-1)))\
+                                    .withColumn("rating",col("rating").cast("int"))\
+                                        .drop("code","message","results_found","results_shown","results_start","status","restaurants")
                                 
                                 
 
@@ -59,9 +64,6 @@ class DataQualityValidator:
         self.notebook_name = notebook_name
         self.timestamp = spark.sql("SELECT current_timestamp() AS ts").collect()[0]["ts"]
         self.results = []
-
-    def _generate_rule_id(self):
-        return str(uuid.uuid4())
 
     def check_not_null_or_blank(self, rule: Dict):
         failed_df = self.df.filter(
@@ -100,10 +102,31 @@ class DataQualityValidator:
             "failed_records": failed_df
         })
 
+    def check_custom_sql(self, rule: Dict):
+        expression = rule.get("expression")
+        failed_df = self.df.filter(expr(expression)) \
+            .withColumn("error", lit(rule.get("description", "Custom SQL check failed"))) \
+            .withColumn("rule_id", lit(rule.get("id", "NA"))) \
+            .withColumn("category", lit(rule.get("category", "unspecified"))) \
+            .withColumn("severity", lit(rule.get("severity", "warning"))) \
+            .withColumn("notebook_name", lit(self.notebook_name)) \
+            .withColumn("timestamp", lit(str(self.timestamp)))
+
+        self.results.append({
+            "rule_id": rule.get("id", "NA"),
+            "rule": rule.get("description", "Custom SQL check failed"),
+            "category": rule.get("category", "unspecified"),
+            "severity": rule.get("severity", "warning"),
+            "failed_count": failed_df.count(),
+            "failed_records": failed_df
+    })
+
     def run_checks(self, rules: List[Dict]):
         for rule in rules:
             if rule["type"] == "not_null_or_blank":
                 self.check_not_null_or_blank(rule)
+            if rule["type"] == "custom_sql":
+                self.check_custom_sql(rule)
             elif rule["type"] == "pattern":
                 self.check_pattern(rule)
 
@@ -120,9 +143,16 @@ class DataQualityValidator:
             "rule_id", "rule", "category", "severity", "failed_count", "notebook_name", "timestamp"
         ])
 
-    def log_errors_to_blob(self, path: str):
+    def log_errors_to_blob(self, base_path: str):
+        # Format timestamp for folder naming
+        now = datetime.datetime.now()
+        timestamp_str = now.strftime("%Y-%m-%dT%H-%M-%S")
+        reject_path = f"{base_path}/rejects_{timestamp_str}"
+        
+        #write the data into reject
         for res in self.results:
-            res["failed_records"].write.mode("append").json(path)
+            if res["failed_records"].count() > 0:
+                res["failed_records"].write.mode("append").json(reject_path)
 
 # COMMAND ----------
 
