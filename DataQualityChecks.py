@@ -51,10 +51,6 @@ df = df_source.withColumn("restaurants",explode("restaurants"))\
 
 # COMMAND ----------
 
-df.display()
-
-# COMMAND ----------
-
 from pyspark.sql import DataFrame
 from pyspark.sql.functions import col, lit, trim, current_timestamp
 from typing import List, Dict
@@ -174,8 +170,3 @@ validator.log_errors_to_blob(reject_path)
 
 summary_df = summary_df.withColumn("batch_id", lit(batch_id))
 summary_df.write.format("delta").mode("append").saveAsTable("workspace.myschema.validation_summary")
-
-# COMMAND ----------
-
-# MAGIC %sql
-# MAGIC select * from workspace.myschema.validation_summary;
